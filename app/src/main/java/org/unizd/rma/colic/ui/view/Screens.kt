@@ -30,7 +30,9 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.ui.unit.Dp
 import androidx.core.graphics.createBitmap
+import androidx.core.graphics.scale
 
 @Composable
 fun RecipeListScreen(
@@ -52,11 +54,7 @@ fun RecipeListScreen(
                     headlineContent = { Text(r.title) },
                     supportingContent = { Text("${r.author} • ${r.difficulty} • ${r.dateAdded.format()}") },
                     leadingContent = {
-                        Image(
-                            bitmap = r.image.asImageBitmap(),
-                            contentDescription = null,
-                            modifier = Modifier.size(56.dp)
-                        )
+                        SafeRecipeThumbnail(r.image, size = 56.dp)
                     },
                     trailingContent = {
                         IconButton(onClick = { vm.delete(r) }) {
@@ -194,19 +192,80 @@ fun RecipeEditScreen(
                 Text(if (image == null) "Pick Image" else "Change Image")
             }
             image?.let {
-                Image(bitmap = it.asImageBitmap(), contentDescription = null, modifier = Modifier.size(160.dp))
+                SafeRecipeThumbnail(it, size = 160.dp)
             }
         }
     }
 }
 
 private fun uriToBitmap(context: Context, uri: Uri): Bitmap {
-    return if (Build.VERSION.SDK_INT >= 28) {
-        val source = ImageDecoder.createSource(context.contentResolver, uri)
-        ImageDecoder.decodeBitmap(source)
-    } else {
-        @Suppress("DEPRECATION")
-        MediaStore.Images.Media.getBitmap(context.contentResolver, uri)
+    val maxDim = 1024
+
+    context.contentResolver.openInputStream(uri).use { input ->
+        requireNotNull(input) { "Cannot open InputStream for $uri" }
+
+        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeStream(input, null, bounds)
+
+        context.contentResolver.openInputStream(uri).use { input2 ->
+            requireNotNull(input2) { "Cannot reopen InputStream for $uri" }
+
+            val inSample = calculateInSampleSize(bounds.outWidth, bounds.outHeight, maxDim, maxDim)
+
+            val opts = android.graphics.BitmapFactory.Options().apply {
+                inJustDecodeBounds = false
+                inSampleSize = inSample
+                inPreferredConfig = Bitmap.Config.RGB_565
+            }
+
+            val decoded = android.graphics.BitmapFactory.decodeStream(input2, null, opts)
+                ?: error("Decode failed for $uri")
+
+            val w = decoded.width
+            val h = decoded.height
+            val scale = maxOf(w.toFloat() / maxDim, h.toFloat() / maxDim, 1f)
+            return if (scale > 1f) {
+                val nw = (w / scale).toInt()
+                val nh = (h / scale).toInt()
+                decoded.scale(nw, nh).also {
+                    if (it !== decoded) decoded.recycle()
+                }
+            } else {
+                decoded
+            }
+        }
+    }
+}
+
+private fun calculateInSampleSize(
+    width: Int,
+    height: Int,
+    reqWidth: Int,
+    reqHeight: Int
+): Int {
+    var inSampleSize = 1
+    var halfW = width / 2
+    var halfH = height / 2
+    while (halfW / inSampleSize >= reqWidth && halfH / inSampleSize >= reqHeight) {
+        inSampleSize *= 2
+    }
+    return maxOf(1, inSampleSize)
+}
+
+@Composable
+private fun SafeRecipeThumbnail(bmp: Bitmap?, size: Dp = 56.dp) {
+    if (bmp == null) {
+        Box(Modifier.size(size)) {}
+        return
+    }
+    runCatching {
+        Image(
+            bitmap = bmp.asImageBitmap(),
+            contentDescription = null,
+            modifier = Modifier.size(size)
+        )
+    }.onFailure {
+        Box(Modifier.size(size)) {}
     }
 }
 
