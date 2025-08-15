@@ -11,7 +11,6 @@ class Converters {
     @TypeConverter
     fun fromBitmap(bmp: Bitmap): ByteArray {
         val out = ByteArrayOutputStream()
-        // Use a compact format; JPEG/WEBP both fine for photos
         if (Build.VERSION.SDK_INT >= 30) {
             bmp.compress(Bitmap.CompressFormat.WEBP_LOSSY, 80, out)
         } else {
@@ -22,14 +21,12 @@ class Converters {
 
     @TypeConverter
     fun toBitmap(bytes: ByteArray): Bitmap {
-        // 1) Bounds decode
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
 
         val maxDim = 1024
         val inSample = calculateInSampleSize(bounds.outWidth, bounds.outHeight, maxDim, maxDim)
 
-        // 2) Sampled decode to reduce memory
         val opts = BitmapFactory.Options().apply {
             inJustDecodeBounds = false
             inSampleSize = inSample
