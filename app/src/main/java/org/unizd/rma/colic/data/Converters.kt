@@ -2,41 +2,58 @@ package org.unizd.rma.colic.data
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.os.Build
+import android.graphics.Color
 import androidx.room.TypeConverter
 import java.io.ByteArrayOutputStream
 import java.util.Date
+import kotlin.math.max
+import androidx.core.graphics.createBitmap
+import androidx.core.graphics.scale
 
 class Converters {
+
     @TypeConverter
     fun fromBitmap(bmp: Bitmap): ByteArray {
+        val maxDim = 2048
+        val w = bmp.width
+        val h = bmp.height
+        val maxSide = max(w, h).toFloat()
+        val scaled: Bitmap = if (maxSide > maxDim) {
+            val scale = maxSide / maxDim
+            val nw = (w / scale).toInt()
+            val nh = (h / scale).toInt()
+            bmp.scale(nw, nh)
+        } else bmp
+
         val out = ByteArrayOutputStream()
-        if (Build.VERSION.SDK_INT >= 30) {
-            bmp.compress(Bitmap.CompressFormat.WEBP_LOSSY, 80, out)
-        } else {
-            bmp.compress(Bitmap.CompressFormat.JPEG, 85, out)
-        }
+        scaled.compress(Bitmap.CompressFormat.JPEG, 85, out)
+
+        if (scaled !== bmp) scaled.recycle()
         return out.toByteArray()
     }
 
     @TypeConverter
     fun toBitmap(bytes: ByteArray): Bitmap {
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        return runCatching {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
 
-        val maxDim = 1024
-        val inSample = calculateInSampleSize(bounds.outWidth, bounds.outHeight, maxDim, maxDim)
+            val maxDim = 1024
+            val inSample = calculateInSampleSize(bounds.outWidth, bounds.outHeight, maxDim, maxDim)
 
-        val opts = BitmapFactory.Options().apply {
-            inJustDecodeBounds = false
-            inSampleSize = inSample
-            inPreferredConfig = Bitmap.Config.RGB_565
+            val opts = BitmapFactory.Options().apply {
+                inJustDecodeBounds = false
+                inSampleSize = inSample
+                inPreferredConfig = Bitmap.Config.RGB_565
+            }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+                ?: throw IllegalStateException("Bitmap decode returned null")
+        }.getOrElse {
+            createBitmap(32, 32).apply {
+                eraseColor(Color.LTGRAY)
+            }
         }
-        return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
-            ?: error("Bitmap decode failed")
     }
-
-
 
     private fun calculateInSampleSize(
         width: Int,

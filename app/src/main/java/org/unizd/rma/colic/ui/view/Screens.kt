@@ -2,12 +2,11 @@ package org.unizd.rma.colic.ui.view
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.ImageDecoder
+import android.graphics.Matrix
 import android.net.Uri
-import android.os.Build
-import android.provider.MediaStore
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts.GetContent
+import androidx.activity.result.contract.ActivityResultContracts.TakePicture
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -17,28 +16,23 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material3.*
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.core.content.FileProvider
+import androidx.core.graphics.createBitmap
+import androidx.core.graphics.scale
+import androidx.exifinterface.media.ExifInterface
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.flow.collectLatest
 import org.unizd.rma.colic.data.model.CookingRecipe
 import java.text.SimpleDateFormat
 import java.util.*
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.Paint
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.ui.unit.Dp
-import androidx.core.graphics.createBitmap
-import androidx.core.graphics.scale
-import androidx.activity.result.contract.ActivityResultContracts.TakePicturePreview
-import android.content.res.Configuration
-import android.graphics.Matrix
-import androidx.exifinterface.media.ExifInterface
-
-
+import androidx.compose.runtime.saveable.rememberSaveable
+import java.io.File
 
 @Composable
 fun RecipeListScreen(
@@ -59,9 +53,7 @@ fun RecipeListScreen(
                 ListItem(
                     headlineContent = { Text(r.title) },
                     supportingContent = { Text("${r.author} • ${r.difficulty} • ${r.dateAdded.format()}") },
-                    leadingContent = {
-                        SafeRecipeThumbnail(r.image, size = 56.dp)
-                    },
+                    leadingContent = { SafeRecipeThumbnail(r.image, size = 56.dp) },
                     trailingContent = {
                         IconButton(onClick = { vm.delete(r) }) {
                             Icon(Icons.Default.Delete, contentDescription = "Delete")
@@ -91,17 +83,26 @@ fun RecipeEditScreen(
     var image by remember { mutableStateOf<Bitmap?>(null) }
 
     val context = androidx.compose.ui.platform.LocalContext.current
+
     val pickImage = rememberLauncherForActivityResult(GetContent()) { uri: Uri? ->
         uri?.let { image = uriToBitmap(context, it) }
     }
 
-    val takePhoto = rememberLauncherForActivityResult(TakePicturePreview()) { bmp: Bitmap? ->
-        bmp?.let { shot ->
-            val fixed = fixPreviewOrientation(context, shot)
-            image = resizeToMaxDim(fixed, 1024)
+    var cameraTempPath by rememberSaveable { mutableStateOf<String?>(null) }
+    val takePicture = rememberLauncherForActivityResult(TakePicture()) { success: Boolean ->
+        val path = cameraTempPath
+        if (success && path != null) {
+            val file = File(path)
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
+            runCatching {
+                image = uriToBitmap(context, uri)
+            }.onFailure {
+                image = placeholderBitmap(title)
+            }
+            file.delete()
         }
+        cameraTempPath = null
     }
-
 
     val dateState = rememberDatePickerState(
         initialSelectedDateMillis = dateAdded.time,
@@ -203,16 +204,21 @@ fun RecipeEditScreen(
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                OutlinedButton(onClick = { takePhoto.launch(null) }) {
+                OutlinedButton(onClick = {
+                    val dir = File(context.cacheDir, "images").apply { mkdirs() }
+                    val file = File(dir, "shot_${System.currentTimeMillis()}.jpg")
+                    cameraTempPath = file.absolutePath  // ← save path in a saveable state
+                    val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
+                    takePicture.launch(uri)
+                }) {
                     Text("Take Photo")
                 }
                 OutlinedButton(onClick = { pickImage.launch("image/*") }) {
                     Text(if (image == null) "Pick Image" else "Change Image")
                 }
             }
-            image?.let {
-                SafeRecipeThumbnail(it, size = 160.dp)
-            }
+
+            image?.let { SafeRecipeThumbnail(it, size = 160.dp) }
         }
     }
 }
@@ -220,40 +226,54 @@ fun RecipeEditScreen(
 private fun uriToBitmap(context: Context, uri: Uri): Bitmap {
     val maxDim = 1024
 
-    context.contentResolver.openInputStream(uri).use { input ->
-        requireNotNull(input) { "Cannot open InputStream for $uri" }
-        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        android.graphics.BitmapFactory.decodeStream(input, null, bounds)
-
-        context.contentResolver.openInputStream(uri).use { input2 ->
-            requireNotNull(input2) { "Cannot reopen InputStream for $uri" }
-
-            val inSample = calculateInSampleSize(bounds.outWidth, bounds.outHeight, maxDim, maxDim)
-            val opts = android.graphics.BitmapFactory.Options().apply {
-                inJustDecodeBounds = false
-                inSampleSize = inSample
-                inPreferredConfig = Bitmap.Config.RGB_565
-            }
-
-            val sampled = android.graphics.BitmapFactory.decodeStream(input2, null, opts)
-                ?: error("Decode failed for $uri")
-
-            val oriented = applyExifOrientation(context, uri, sampled)
-
-            val w = oriented.width
-            val h = oriented.height
-            val scale = maxOf(w.toFloat() / maxDim, h.toFloat() / maxDim, 1f)
-            return if (scale > 1f) {
-                val nw = (w / scale).toInt()
-                val nh = (h / scale).toInt()
-                oriented.scale(nw, nh).also {
-                    if (it !== oriented) oriented.recycle()
-                }
-            } else oriented
-        }
+    val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    context.contentResolver.openInputStream(uri)?.use {
+        android.graphics.BitmapFactory.decodeStream(it, null, bounds)
     }
+
+    val inSample = calculateInSampleSize(bounds.outWidth, bounds.outHeight, maxDim, maxDim)
+    val opts = android.graphics.BitmapFactory.Options().apply {
+        inJustDecodeBounds = false
+        inSampleSize = inSample
+        inPreferredConfig = Bitmap.Config.RGB_565
+    }
+    val sampled = context.contentResolver.openInputStream(uri)?.use {
+        android.graphics.BitmapFactory.decodeStream(it, null, opts)
+    } ?: error("Decode failed for $uri")
+
+    val oriented = applyExifOrientation(context, uri, sampled)
+
+    val w = oriented.width
+    val h = oriented.height
+    val scale = maxOf(w.toFloat() / maxDim, h.toFloat() / maxDim, 1f)
+    return if (scale > 1f) {
+        val nw = (w / scale).toInt()
+        val nh = (h / scale).toInt()
+        oriented.scale(nw, nh).also { if (it !== oriented) oriented.recycle() }
+    } else oriented
 }
 
+private fun applyExifOrientation(context: Context, uri: Uri, bmp: Bitmap): Bitmap {
+    val exif = runCatching {
+        context.contentResolver.openInputStream(uri)?.use { ExifInterface(it) }
+    }.getOrNull() ?: return bmp
+
+    val o = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+    val m = Matrix()
+    when (o) {
+        ExifInterface.ORIENTATION_ROTATE_90       -> m.postRotate(90f)
+        ExifInterface.ORIENTATION_ROTATE_180      -> m.postRotate(180f)
+        ExifInterface.ORIENTATION_ROTATE_270      -> m.postRotate(270f)
+        ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> m.preScale(-1f, 1f)
+        ExifInterface.ORIENTATION_FLIP_VERTICAL   -> m.preScale(1f, -1f)
+        ExifInterface.ORIENTATION_TRANSPOSE       -> { m.postRotate(90f);  m.preScale(-1f, 1f) }
+        ExifInterface.ORIENTATION_TRANSVERSE      -> { m.postRotate(270f); m.preScale(-1f, 1f) }
+        else -> return bmp
+    }
+    return Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true).also {
+        if (it !== bmp) bmp.recycle()
+    }
+}
 
 private fun calculateInSampleSize(
     width: Int,
@@ -272,19 +292,10 @@ private fun calculateInSampleSize(
 
 @Composable
 private fun SafeRecipeThumbnail(bmp: Bitmap?, size: Dp = 56.dp) {
-    if (bmp == null) {
-        Box(Modifier.size(size)) {}
-        return
-    }
+    if (bmp == null) { Box(Modifier.size(size)) { } ; return }
     runCatching {
-        Image(
-            bitmap = bmp.asImageBitmap(),
-            contentDescription = null,
-            modifier = Modifier.size(size)
-        )
-    }.onFailure {
-        Box(Modifier.size(size)) {}
-    }
+        Image(bitmap = bmp.asImageBitmap(), contentDescription = null, modifier = Modifier.size(size))
+    }.onFailure { Box(Modifier.size(size)) { } }
 }
 
 private fun Date.format(): String =
@@ -293,72 +304,16 @@ private fun Date.format(): String =
 private fun placeholderBitmap(title: String): Bitmap {
     val size = 256
     val bmp = createBitmap(size, size)
-    val canvas = Canvas(bmp)
-
-    canvas.drawColor(Color.LTGRAY)
-
+    val canvas = android.graphics.Canvas(bmp)
+    canvas.drawColor(android.graphics.Color.LTGRAY)
     val initial = title.firstOrNull()?.uppercaseChar()?.toString() ?: "R"
-    val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.DKGRAY
+    val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        color = android.graphics.Color.DKGRAY
         textSize = size * 0.45f
-        textAlign = Paint.Align.CENTER
+        textAlign = android.graphics.Paint.Align.CENTER
     }
     val x = size / 2f
     val y = (size / 2f) - ((paint.descent() + paint.ascent()) / 2f)
     canvas.drawText(initial, x, y, paint)
-
     return bmp
 }
-
-private fun resizeToMaxDim(src: Bitmap, maxDim: Int = 1024): Bitmap {
-    val w = src.width
-    val h = src.height
-    val maxSide = maxOf(w, h).toFloat()
-    if (maxSide <= maxDim) return src
-    val scale = maxSide / maxDim
-    val nw = (w / scale).toInt()
-    val nh = (h / scale).toInt()
-    return src.scale(nw, nh).also {
-        if (it !== src) src.recycle()
-    }
-}
-
-private fun applyExifOrientation(context: Context, uri: Uri, bmp: Bitmap): Bitmap {
-    val exif = runCatching {
-        context.contentResolver.openInputStream(uri)?.use { ExifInterface(it) }
-    }.getOrNull() ?: return bmp
-
-    val orientation = exif.getAttributeInt(
-        ExifInterface.TAG_ORIENTATION,
-        ExifInterface.ORIENTATION_NORMAL
-    )
-
-    val matrix = Matrix()
-    when (orientation) {
-        ExifInterface.ORIENTATION_ROTATE_90       -> matrix.postRotate(90f)
-        ExifInterface.ORIENTATION_ROTATE_180      -> matrix.postRotate(180f)
-        ExifInterface.ORIENTATION_ROTATE_270      -> matrix.postRotate(270f)
-        ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.preScale(-1f, 1f)
-        ExifInterface.ORIENTATION_FLIP_VERTICAL   -> matrix.preScale(1f, -1f)
-        ExifInterface.ORIENTATION_TRANSPOSE       -> { matrix.postRotate(90f); matrix.preScale(-1f, 1f) }
-        ExifInterface.ORIENTATION_TRANSVERSE      -> { matrix.postRotate(270f); matrix.preScale(-1f, 1f) }
-        else -> return bmp
-    }
-
-    return Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, matrix, true).also {
-        if (it !== bmp) bmp.recycle()
-    }
-}
-
-private fun fixPreviewOrientation(context: Context, bmp: Bitmap): Bitmap {
-    val portrait = context.resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
-    return if (portrait && bmp.width > bmp.height) {
-        val m = Matrix().apply { postRotate(90f) }
-        Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true).also {
-            if (it !== bmp) bmp.recycle()
-        }
-    } else bmp
-}
-
-
-
