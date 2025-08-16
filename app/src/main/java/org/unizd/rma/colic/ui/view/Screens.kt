@@ -33,6 +33,8 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.ui.unit.Dp
 import androidx.core.graphics.createBitmap
 import androidx.core.graphics.scale
+import androidx.activity.result.contract.ActivityResultContracts.TakePicturePreview
+
 
 @Composable
 fun RecipeListScreen(
@@ -87,6 +89,10 @@ fun RecipeEditScreen(
     val context = androidx.compose.ui.platform.LocalContext.current
     val pickImage = rememberLauncherForActivityResult(GetContent()) { uri: Uri? ->
         uri?.let { image = uriToBitmap(context, it) }
+    }
+
+    val takePhoto = rememberLauncherForActivityResult(TakePicturePreview()) { bmp: Bitmap? ->
+        bmp?.let { image = resizeToMaxDim(it, 1024) }
     }
 
     val dateState = rememberDatePickerState(
@@ -188,8 +194,13 @@ fun RecipeEditScreen(
                 }
             }
 
-            OutlinedButton(onClick = { pickImage.launch("image/*") }) {
-                Text(if (image == null) "Pick Image" else "Change Image")
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedButton(onClick = { takePhoto.launch(null) }) {
+                    Text("Take Photo")
+                }
+                OutlinedButton(onClick = { pickImage.launch("image/*") }) {
+                    Text(if (image == null) "Pick Image" else "Change Image")
+                }
             }
             image?.let {
                 SafeRecipeThumbnail(it, size = 160.dp)
@@ -291,4 +302,18 @@ private fun placeholderBitmap(title: String): Bitmap {
 
     return bmp
 }
+
+private fun resizeToMaxDim(src: Bitmap, maxDim: Int = 1024): Bitmap {
+    val w = src.width
+    val h = src.height
+    val maxSide = maxOf(w, h).toFloat()
+    if (maxSide <= maxDim) return src
+    val scale = maxSide / maxDim
+    val nw = (w / scale).toInt()
+    val nh = (h / scale).toInt()
+    return src.scale(nw, nh).also {
+        if (it !== src) src.recycle()
+    }
+}
+
 
