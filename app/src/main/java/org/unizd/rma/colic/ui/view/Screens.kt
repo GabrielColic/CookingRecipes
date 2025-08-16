@@ -2,6 +2,7 @@ package org.unizd.rma.colic.ui.view
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -18,6 +19,7 @@ import androidx.compose.material.icons.filled.Save
 import androidx.compose.material3.*
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.unit.Dp
@@ -28,11 +30,12 @@ import androidx.core.graphics.scale
 import androidx.exifinterface.media.ExifInterface
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.firstOrNull
 import org.unizd.rma.colic.data.model.CookingRecipe
+import java.io.File
+import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.*
-import androidx.compose.runtime.saveable.rememberSaveable
-import java.io.File
 
 @Composable
 fun RecipeListScreen(
@@ -75,17 +78,24 @@ fun RecipeEditScreen(
     recipeId: Int?,
     onDone: () -> Unit
 ) {
-    var title by remember { mutableStateOf("") }
-    var author by remember { mutableStateOf("") }
+    var title by rememberSaveable { mutableStateOf("") }
+    var author by rememberSaveable { mutableStateOf("") }
     val difficulties = listOf("Easy", "Medium", "Hard")
-    var difficulty by remember { mutableStateOf(difficulties.first()) }
+    var difficulty by rememberSaveable { mutableStateOf(difficulties.first()) }
     var dateAdded by remember { mutableStateOf(Date()) }
+
     var image by remember { mutableStateOf<Bitmap?>(null) }
+    var imagePath by rememberSaveable { mutableStateOf<String?>(null) } // survives rotation
+    var loaded by rememberSaveable { mutableStateOf(false) }
 
     val context = androidx.compose.ui.platform.LocalContext.current
 
     val pickImage = rememberLauncherForActivityResult(GetContent()) { uri: Uri? ->
-        uri?.let { image = uriToBitmap(context, it) }
+        uri?.let {
+            val bmp = uriToBitmap(context, it)
+            imagePath = saveBitmapToCache(context, bmp)
+            image = bmp
+        }
     }
 
     var cameraTempPath by rememberSaveable { mutableStateOf<String?>(null) }
@@ -95,13 +105,21 @@ fun RecipeEditScreen(
             val file = File(path)
             val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
             runCatching {
-                image = uriToBitmap(context, uri)
+                val bmp = uriToBitmap(context, uri)
+                imagePath = saveBitmapToCache(context, bmp)
+                image = bmp
             }.onFailure {
                 image = placeholderBitmap(title)
             }
             file.delete()
         }
         cameraTempPath = null
+    }
+
+    LaunchedEffect(imagePath) {
+        if (image == null && imagePath != null) {
+            image = loadBitmapFromPath(imagePath!!)
+        }
     }
 
     val dateState = rememberDatePickerState(
@@ -113,25 +131,28 @@ fun RecipeEditScreen(
     )
     var showDatePicker by remember { mutableStateOf(false) }
 
-    LaunchedEffect(recipeId) {
-        if (recipeId != null) {
-            vm.byId(recipeId).collectLatest { r ->
-                r?.let {
-                    title = it.title
-                    author = it.author
-                    difficulty = it.difficulty
-                    dateAdded = it.dateAdded
-                    dateState.selectedDateMillis = it.dateAdded.time
-                    image = it.image
-                }
+    LaunchedEffect(recipeId, loaded) {
+        if (recipeId != null && !loaded) {
+            val r = vm.byId(recipeId).firstOrNull()
+            r?.let {
+                if (title.isEmpty()) title = it.title
+                if (author.isEmpty()) author = it.author
+                difficulty = it.difficulty
+                dateAdded = it.dateAdded
+                dateState.selectedDateMillis = it.dateAdded.time
+                if (image == null) image = it.image
             }
+            loaded = true
         }
     }
 
     Scaffold(
         floatingActionButton = {
             FloatingActionButton(onClick = {
-                val bmp = image ?: placeholderBitmap(title)
+                val bmp = image
+                    ?: imagePath?.let { loadBitmapFromPath(it) }
+                    ?: placeholderBitmap(title)
+
                 val millis = dateState.selectedDateMillis ?: dateAdded.time
                 if (recipeId == null) {
                     vm.create(title.trim(), author.trim(), difficulty, Date(millis), bmp)
@@ -207,7 +228,7 @@ fun RecipeEditScreen(
                 OutlinedButton(onClick = {
                     val dir = File(context.cacheDir, "images").apply { mkdirs() }
                     val file = File(dir, "shot_${System.currentTimeMillis()}.jpg")
-                    cameraTempPath = file.absolutePath  // ← save path in a saveable state
+                    cameraTempPath = file.absolutePath
                     val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
                     takePicture.launch(uri)
                 }) {
@@ -226,19 +247,19 @@ fun RecipeEditScreen(
 private fun uriToBitmap(context: Context, uri: Uri): Bitmap {
     val maxDim = 1024
 
-    val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     context.contentResolver.openInputStream(uri)?.use {
-        android.graphics.BitmapFactory.decodeStream(it, null, bounds)
+        BitmapFactory.decodeStream(it, null, bounds)
     }
 
     val inSample = calculateInSampleSize(bounds.outWidth, bounds.outHeight, maxDim, maxDim)
-    val opts = android.graphics.BitmapFactory.Options().apply {
+    val opts = BitmapFactory.Options().apply {
         inJustDecodeBounds = false
         inSampleSize = inSample
         inPreferredConfig = Bitmap.Config.RGB_565
     }
     val sampled = context.contentResolver.openInputStream(uri)?.use {
-        android.graphics.BitmapFactory.decodeStream(it, null, opts)
+        BitmapFactory.decodeStream(it, null, opts)
     } ?: error("Decode failed for $uri")
 
     val oriented = applyExifOrientation(context, uri, sampled)
@@ -316,4 +337,26 @@ private fun placeholderBitmap(title: String): Bitmap {
     val y = (size / 2f) - ((paint.descent() + paint.ascent()) / 2f)
     canvas.drawText(initial, x, y, paint)
     return bmp
+}
+
+private fun saveBitmapToCache(context: Context, bmp: Bitmap): String {
+    val dir = File(context.cacheDir, "images").apply { mkdirs() }
+    val file = File(dir, "edit_current.jpg")
+    FileOutputStream(file).use { out ->
+        bmp.compress(Bitmap.CompressFormat.JPEG, 85, out)
+    }
+    return file.absolutePath
+}
+
+private fun loadBitmapFromPath(path: String, maxDim: Int = 1024): Bitmap {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeFile(path, bounds)
+    val inSample = calculateInSampleSize(bounds.outWidth, bounds.outHeight, maxDim, maxDim)
+    val opts = BitmapFactory.Options().apply {
+        inJustDecodeBounds = false
+        inSampleSize = inSample
+        inPreferredConfig = Bitmap.Config.RGB_565
+    }
+    return BitmapFactory.decodeFile(path, opts)
+        ?: error("Failed to decode cached bitmap at $path")
 }
