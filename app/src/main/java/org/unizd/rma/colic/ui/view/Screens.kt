@@ -34,6 +34,10 @@ import androidx.compose.ui.unit.Dp
 import androidx.core.graphics.createBitmap
 import androidx.core.graphics.scale
 import androidx.activity.result.contract.ActivityResultContracts.TakePicturePreview
+import android.content.res.Configuration
+import android.graphics.Matrix
+import androidx.exifinterface.media.ExifInterface
+
 
 
 @Composable
@@ -92,8 +96,12 @@ fun RecipeEditScreen(
     }
 
     val takePhoto = rememberLauncherForActivityResult(TakePicturePreview()) { bmp: Bitmap? ->
-        bmp?.let { image = resizeToMaxDim(it, 1024) }
+        bmp?.let { shot ->
+            val fixed = fixPreviewOrientation(context, shot)
+            image = resizeToMaxDim(fixed, 1024)
+        }
     }
+
 
     val dateState = rememberDatePickerState(
         initialSelectedDateMillis = dateAdded.time,
@@ -214,7 +222,6 @@ private fun uriToBitmap(context: Context, uri: Uri): Bitmap {
 
     context.contentResolver.openInputStream(uri).use { input ->
         requireNotNull(input) { "Cannot open InputStream for $uri" }
-
         val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
         android.graphics.BitmapFactory.decodeStream(input, null, bounds)
 
@@ -222,31 +229,31 @@ private fun uriToBitmap(context: Context, uri: Uri): Bitmap {
             requireNotNull(input2) { "Cannot reopen InputStream for $uri" }
 
             val inSample = calculateInSampleSize(bounds.outWidth, bounds.outHeight, maxDim, maxDim)
-
             val opts = android.graphics.BitmapFactory.Options().apply {
                 inJustDecodeBounds = false
                 inSampleSize = inSample
                 inPreferredConfig = Bitmap.Config.RGB_565
             }
 
-            val decoded = android.graphics.BitmapFactory.decodeStream(input2, null, opts)
+            val sampled = android.graphics.BitmapFactory.decodeStream(input2, null, opts)
                 ?: error("Decode failed for $uri")
 
-            val w = decoded.width
-            val h = decoded.height
+            val oriented = applyExifOrientation(context, uri, sampled)
+
+            val w = oriented.width
+            val h = oriented.height
             val scale = maxOf(w.toFloat() / maxDim, h.toFloat() / maxDim, 1f)
             return if (scale > 1f) {
                 val nw = (w / scale).toInt()
                 val nh = (h / scale).toInt()
-                decoded.scale(nw, nh).also {
-                    if (it !== decoded) decoded.recycle()
+                oriented.scale(nw, nh).also {
+                    if (it !== oriented) oriented.recycle()
                 }
-            } else {
-                decoded
-            }
+            } else oriented
         }
     }
 }
+
 
 private fun calculateInSampleSize(
     width: Int,
@@ -315,5 +322,43 @@ private fun resizeToMaxDim(src: Bitmap, maxDim: Int = 1024): Bitmap {
         if (it !== src) src.recycle()
     }
 }
+
+private fun applyExifOrientation(context: Context, uri: Uri, bmp: Bitmap): Bitmap {
+    val exif = runCatching {
+        context.contentResolver.openInputStream(uri)?.use { ExifInterface(it) }
+    }.getOrNull() ?: return bmp
+
+    val orientation = exif.getAttributeInt(
+        ExifInterface.TAG_ORIENTATION,
+        ExifInterface.ORIENTATION_NORMAL
+    )
+
+    val matrix = Matrix()
+    when (orientation) {
+        ExifInterface.ORIENTATION_ROTATE_90       -> matrix.postRotate(90f)
+        ExifInterface.ORIENTATION_ROTATE_180      -> matrix.postRotate(180f)
+        ExifInterface.ORIENTATION_ROTATE_270      -> matrix.postRotate(270f)
+        ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.preScale(-1f, 1f)
+        ExifInterface.ORIENTATION_FLIP_VERTICAL   -> matrix.preScale(1f, -1f)
+        ExifInterface.ORIENTATION_TRANSPOSE       -> { matrix.postRotate(90f); matrix.preScale(-1f, 1f) }
+        ExifInterface.ORIENTATION_TRANSVERSE      -> { matrix.postRotate(270f); matrix.preScale(-1f, 1f) }
+        else -> return bmp
+    }
+
+    return Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, matrix, true).also {
+        if (it !== bmp) bmp.recycle()
+    }
+}
+
+private fun fixPreviewOrientation(context: Context, bmp: Bitmap): Bitmap {
+    val portrait = context.resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
+    return if (portrait && bmp.width > bmp.height) {
+        val m = Matrix().apply { postRotate(90f) }
+        Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true).also {
+            if (it !== bmp) bmp.recycle()
+        }
+    } else bmp
+}
+
 
 
